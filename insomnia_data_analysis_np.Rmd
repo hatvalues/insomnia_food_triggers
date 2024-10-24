@@ -1,0 +1,420 @@
+---
+author: Julian Hatwell
+date: "2024-01-015"
+title: "Non-Parametric Survival Analysis of a Sleep Diary"
+slug: non-parametric-survival-food-diary
+mathjax: true
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  echo = FALSE
+)
+
+knitr::opts_template$set(
+  fig.wide = list(fig.height = 4.5, fig.width = 8, fig.align='center'),
+  fig.wideX = list(fig.height = 3, fig.width = 9, fig.align='center'),
+  fig.relaxed = list(fig.height = 6, fig.width = 8, fig.align='center'),
+  fig.tile = list(fig.height = 3, fig.width = 3, fig.align='center')
+)
+```
+
+
+```{r load_libs}
+library(lattice)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(survival)
+library(Hmisc)
+library(goftest)
+library(fitdistrplus)
+library(patchwork)
+```
+
+## Introduction
+
+```{r load_data}
+dframe <- read.csv("data/insomnia-diary.csv")
+```
+
+```{r set_up_months}
+days_in_months <- c(31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+month_vector <- rep(1:12, times = days_in_months)
+dframe$month_number <- month_vector
+month_name <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+month_positions <-c(0, cumsum(days_in_months) + 1)[-13]
+dframe$month <- month_name[dframe$month_number]
+```
+
+```{r feature_engineering}
+dframe$quarter <- (dframe$month_number - 1) %/% 3 + 1
+dframe[["combo_foods"]] <- factor(with(dframe, cheese * 1 + brassica * 2 + meat * 4 + spice * 8))
+
+dframe[["trend"]] = 1:length(dframe$time_sleeping)
+dframe[["ar_1"]] = c(dframe$time_sleeping[1], head(dframe$time_sleeping, -1))
+dframe[["ar_2"]] = c(rep(dframe$time_sleeping[1], 2), head(dframe$time_sleeping, -2))
+dframe[["ar_3"]] = c(rep(dframe$time_sleeping[1], 3), head(dframe$time_sleeping, -3))
+dframe[["ar_4"]] = c(rep(dframe$time_sleeping[1], 4), head(dframe$time_sleeping, -4))
+```
+
+```{r hms_helper}
+convert_hms <- function(hours) {
+  total_seconds <- hours * 3600
+  hrs <- as.integer(floor(total_seconds / 3600))
+  mins <- as.integer(floor((total_seconds %% 3600) / 60))
+  secs <- as.integer(total_seconds %% 60)
+
+  sprintf("%02d hours %02d minutes %02d seconds", hrs, mins, secs)
+}
+```
+
+Earlier this month I carried out a parametric survival analysis over a self-generated dataset of my sleep times each day over the previous year. Using the scientific method, of course, I set about the task with a null hypothesis that eating certain food groups for dinner had no effect on my sleep. The findings were indeed very interesting, and I was able to reject the null hypothesis using a parametric regression of the data set using a Weibull survival regression. You can read about that here, so I won't repeat myself and I'll skip the exploratory analysis. Just remember, the diagnosis is not great! My median nightly sleep time is `r round(median(dframe$time_sleeping), 2)` hours, or `r convert_hms(median(dframe$time_sleeping))`.
+
+In this post, I take the opportunity to explore the same dataset with a more widely used survival analysis, the non-parametric Kaplan-Meyer estimator. As usual, I'll differ printing out code until the end, unless there is something interesting to show in context.
+
+## The K-M Estimator
+
+The K-M Estimator is calculated cumulatively at each time point where an event occurs.
+
+$$
+\hat{S}(t) = \prod_{\substack{t_i \leq t}}{\left( 1 - \frac{d_i}{n_i}\right)}
+$$
+where $n_i$ is the number of observations who have survived up to time $t_i$, or in my case the number of nights where I would still be asleep, and $d_i$ is the number of observations who fail at time $t_i$, or in my case, the number of nights where sleep ends at that elapsed time.
+
+The variance of this estimator is:
+
+$$
+\mathrm{var}\left( \hat{S}(t) \right) \approx \left[ {\hat{S}(t)}^2 \right] \sum_{\substack{t_i \leq t}} \frac{d_i}{n_i(n_i - d_i)}
+$$
+and it is usual to take the complementary log-log transform $\mathrm{var}\big( \log \big[ -\log {\hat{S}(t)}^2 \big] \big)$ to constrain the confidence intervals between zero and one.
+
+In a typical survival study, there is an additional factor to consider. Survival studies originate in longitudinal studies of people and conditions generally ending in death. Longitudinal studies are prone to individuals exiting the study over time for other reasons than the events under analysis. When an individual exits the study early, their record is said to be right-censored. It is clipped at the point in time when the individual is no longer observed. It is possible to use the information provided by their length of survival during participation, so long as the uncertainty is also taken into account of not being able to observe if/when the event occurs (e.g. death, relapse, or failure in the case of hardware). Right-censored events increase the variance following the end of their time in the study.
+
+To represent the right-censoring in R, you would provide a Boolean vector of equal length as the observations vector into the *Surv* object. In my sleep diary, however, each observation is a completely measured night's sleep and so there aren't any censored observations. To demonstrate the intricacies of this method, I will first construct the univariate estimator, without adding any co-factors, so the formula is given with just a constant (~1).
+
+```{r estimator, echo=TRUE}
+estimator <- survfit(Surv(time_sleeping) ~ 1, conf.type="log-log", data = dframe)
+estimator
+```
+
+The median sleeping time and 95% confidence intervals are provided by the estimator based on:
+
+$$
+\hat{t}_{\mathrm{med}} = \mathrm{inf} \left\{ t : \hat{S}(t) \leq 0.5 \right\}
+$$
+
+
+```{r median_ci}
+med <- quantile(estimator, 0.5)
+med_sleep <- med$`quantile`
+lc_sleep <- med$lower
+uc_sleep <- med$upper
+```
+
+R makes everything trivial to calculate. The median sleeping time is `r convert_hms(med_sleep)` with a lower confidence estimate of `r convert_hms(lc_sleep)` and an upper confidence interval of `r convert_hms(uc_sleep)`.
+
+```{r estimator_plot}
+plot(estimator, conf.int = TRUE, xlab="Time (hr)", ylab = "Survival (still sleeping) Probability")
+title("Kaplan-Meyer Estimator of Insomnia Diary Data")
+abline(h = 0.5, col = "red", lty = 3)
+lines(rep(x = uc_sleep, 2), y = c(0, 0.5), col = "blue", lty = 2)
+lines(rep(x = lc_sleep, 2), y = c(0, 0.5), col = "blue", lty = 2)
+lines(rep(x = med_sleep, 2), y = c(0, 0.5), col = "green", lty = 2)
+```
+
+The red (reference) line represent the level where $\hat{S}(t) = 0.5$ and the green (median) and blue (ci) drop lines show where the reference line intersects with the estimator and its confidence interval.
+
+Typically, survival curves from KM estimators do not look like this. Thanks to the even density of data points (this is essentially a time series), the above plot looks like taking the 365 observations stacked on top of each other in order from the shortest on top to the longest at the bottom. The resulting curve has some similarity to the Weibull curves that I was able to infer using the parametric approach.
+
+## Multivariate Analysis
+
+### Categorical Variables
+
+Non-parametric survival analysis, with it's roots in clinical trials, is well-developed for comparing two groups and handling perhaps one categorical co-variate with a small number of strata, or one continuous co-variate, but it certainly isn't common to see the exploratory approach that I used in the previous post on parametric methods.
+
+Sticking to tried and testing methods, I'll just demonstrate some simple between groups hypothesis testing, using one food trigger at a time. Recall that eating a meal containing cheese for dinner seemed to have a very pronounced effect on me, reducing the median sleep time by about 1 hour 40 minutes when comparing nights when dinner contained none of the analysed food triggers.
+
+I will test the null hypothesis that eating cheese has no effect on sleep times. That is $H_0 : S_C(t) = S_N(t)$ and the alternative is $H_A : S_C(t) \neq S_N(t)$ (or $H_A : S_C(t) < S_N(t)$ for a one-sided test), where $S_C$ is the survival distribution for cheesy nights, and $S_N$ for nights with no food trigger. The standard test is the Mantel-Cox test or log-rank test, which tallies a contingency table for treatment (cheese) and control (no food trigger) observations at each event (end of sleep cycle) time. I won't reproduce the full derivation here but the resulting statistic follows a $\chi^2$ distribution.
+
+```{r diff_cheese}
+survdiff(Surv(time_sleeping) ~ cheese, data = dframe)
+```
+
+Evidently, this is a significant result and the null hypothesis is rejected. The effect can be visually analysed with a simple plot.
+
+```{r plot_cheese}
+plot(survfit(Surv(time_sleeping) ~ cheese, data = dframe), xlab="Time (hr)", ylab = "Survival (still sleeping) Probability", col=c("black", "red"), lwd = 1)
+legend("topright", legend=c("no cheese", "cheese"), col=c("black", "red"), lwd = 1)
+```
+What's nice about the KM estimator survival curve is that, unlike a parametric distribution, you can clearly see the location of each event, giving you full transperancy over your empiricial data. In a typical survival study, with perhaps only tens of subjects, the piece-wise nature is really clear and locating sudden changes in the distribution is a matter of a quick visual check.
+
+Let's take a look at the other food triggers.
+
+```{r diff_brassica}
+survdiff(Surv(time_sleeping) ~ brassica, data = dframe)
+```
+
+```{r plot_brassica}
+plot(survfit(Surv(time_sleeping) ~ brassica, data = dframe), xlab="Time (hr)", ylab = "Survival (still sleeping) Probability", col=c("black", "red"), lwd = 1)
+legend("topright", legend=c("no brassica", "brassica"), col=c("black", "red"), lwd = 1)
+```
+
+```{r diff_meat}
+survdiff(Surv(time_sleeping) ~ meat, data = dframe)
+```
+
+```{r plot_meat}
+plot(survfit(Surv(time_sleeping) ~ meat, data = dframe), xlab="Time (hr)", ylab = "Survival (still sleeping) Probability", col=c("black", "red"), lwd = 1)
+legend("topright", legend=c("no meat", "meat"), col=c("black", "red"), lwd = 1)
+```
+
+```{r diff_spice}
+survdiff(Surv(time_sleeping) ~ spice, data = dframe)
+```
+
+```{r plot_spice}
+plot(survfit(Surv(time_sleeping) ~ spice, data = dframe), xlab="Time (hr)", ylab = "Survival (still sleeping) Probability", col=c("black", "red"), lwd = 1)
+legend("topright", legend=c("no spice", "spice"), col=c("black", "red"), lwd = 1)
+```
+
+All the above details are consistent with the parametric findings.
+
+### Continuous Variables
+
+In the previous post, by creating autoregressive features from the time sleeping variable, I identified that the sleep time from the night before affected the sleep time for a given night. I assume that there was some physiological pressure to "catch up." The same was not true for the previous to last night. We can perform a similar investigation non-parametrically.
+
+I haven't referred to the hazard function $h(t)$, because I want to keep these posts a bit light on detail, but this is essentially the instantaneous failure rate at time $t$. It is defined as follows:
+
+$$
+h(t) = \lim_{\substack{\delta \rightarrow0}} \frac{P(\mathrm{event_T} | t < T < t + \delta | T > t)}{\delta}
+$$
+
+where $P(\mathrm{event_T})$ is the probability of an event happening at instant T within some tiny time increment $\delta$. There is a mathematical relationship between hazard and survival but it takes a few steps to derive it, so I'll be a bit hand-wavey here and just say that where $h(t)$ is high, $S(t)$ is falling fast.
+
+Analysis of hazard functions is done by Cox's Proportional Hazards, which uses a log-likelihood statistic and can be used for survival regression. The coefficients of a proportional hazards regression analysis follow a normal distribution and so can be subject to familiar significance tests.
+
+Let's quickly see how this looks for the cheese trigger to develop some intuition before using it to assess the autoregressive effect of previous night sleeping time.
+
+```{r cph_cheese}
+cph_cheese <- coxph(Surv(time_sleeping) ~ factor(cheese), data = dframe)
+summary(cph_cheese)
+```
+
+This analysis is indicating a log proportional hazard of `r cph_cheese$coefficients[[1]]` for nights with a meal containing cheese (zero for no cheese), which is statistically significant.
+
+```{r cph_cheese_plot}
+termplot(cph_cheese, se = TRUE, terms = 1, ylabs = "Log hazard")
+```
+
+Now for the analysis for my autoregressive features of one and two nights previous. I don't anticipate a linear relationship so I will pass a penalized spline into the model.
+
+```{r cph_ar}
+cph_ar <- coxph(Surv(time_sleeping) ~ pspline(ar_1, df=2) + pspline(ar_2, df=2), data=dframe)
+cph_ar
+```
+```{r text_helper}
+summary_output <- summary(cph_ar)
+linear_coeffs <- summary_output$coefficients
+```
+
+This is an interesting result that differs from the parametric findings. The print out shows a coefficient for each spline's linear part, and a significance test only for the non-linear part. Sleep time on both the previous night (coef = `r round(linear_coeffs[1], 4)`) and two nights previous (coef = `r round(linear_coeffs[3], 4)`) have an effect, with two nights previous being slightly larger. Both coefficients are found to be significant and negative, and so inversely proportional. The interpretation is that less time sleeping on previous nights increases the harzard. This runs counter to intuition and the parametric findings. However, R provides a built in plotting function that reveals the relationship very clearly.
+
+```{r cph_ar_plot}
+termplot(cph_ar, se = TRUE, terms = 1, ylabs = "Log hazard", xlabs = "Previous Night")
+abline(h = 0, col="grey", lty=3)
+
+termplot(cph_ar, se = TRUE, terms = 2, ylabs = "Log hazard", xlabs = "Two Nights Previous")
+abline(h = 0, col="grey", lty=3)
+```
+
+The plots confirm the model results that hazard increases with less sleep on the previous two nights. There is an inflection point somewhere near the median sleep time where the effect is neutral in both cases. The non-intuitive inverse relationship could be a result of not running the other co-factors in the model (something akin to Simpson's paradox).
+
+Unlike the survival curve analysis, it's more intuitive to run a multivariate proportional hazards regression with many more co-factors. I'll run the model with the seasonal (month) effect included to see if my hunch is correct.
+
+```{r cph_ar_seasonal}
+cph_ar <- coxph(Surv(time_sleeping) ~ pspline(ar_1, df=2) + pspline(ar_2, df=2) + month, data=dframe)
+cph_ar
+```
+
+```{r text_helper_2}
+summary_output <- summary(cph_ar)
+linear_coeffs <- summary_output$coefficients
+```
+
+Wow! I was absolutely spot on. Controlling for the seasonal effect of just sleeping less in the shorter summer nights, the results are consistent with the findings from last time. Sleep time on the previous night (coef = `r round(linear_coeffs[1], 4)`) has a significant effect that is no longer reversed, and two nights previous (coef = `r round(linear_coeffs[3], 4)`) no longer has a significant effect. 
+
+```{r cph_ar_plot_seasonal}
+termplot(cph_ar, se = TRUE, terms = 1, ylabs = "Log hazard", xlabs = "Previous Night")
+abline(h = 0, col="grey", lty=3)
+
+termplot(cph_ar, se = TRUE, terms = 2, ylabs = "Log hazard", xlabs = "Two Nights Previous")
+abline(h = 0, col="grey", lty=3)
+```
+
+The plots confirm this finding, with previous night hazard appearing to fall monotonically with less sleep, while for two nights previous, the zero reference line is entirely contained inside the confidence interval.
+
+## Further work
+
+It is possible to go further with proportional hazards regression and to select the best model using log-likelihood tests for nested models and AIC for non-nested models. This is familiar territory for linear models and GLMs. I performed this procedure in the previous post on parametric survival analysis. So for the moment, my investigation will end here.
+
+## Conclusion
+
+Running a typical survival analysis on an atypical dataset was an interesting exercise. It did yield a confusing result as I progressed to a more advanced regression analysis with autoregressive continuous variables at first, but this was cleared up by approaching the problem with a critical mindset.
+
+The parametric approach from the previous post yielded a very satisfying analysis because the data was well-fitting to the Weibull distribution, as well as acheiving goodness of fit with a Gamma distribution and normal distribution. However, the non-parametric survival curves yielded by the Kaplan-Meyer estimator actually show you the true, empirical picture of your data set rather than some theoretical distribution. In most cases, this is preferable to work with.
+
+We couldn't look into some of the aspects of survival analysis that only present themselves in longitudinal studies, such as observations being censored by exiting the study prior to the analysed events. I may return to this topic in a future post.
+
+Overall, it was really great fun to work with a self-generated data set that defines a problem that is pretty core to my personal life. I learned a lot about how to manage my chronic insomnia and that can only be a good thing.
+
+## Code Appendix
+
+```{r echo=TRUE, eval=FALSE}
+library(lattice)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(survival)
+library(Hmisc)
+library(goftest)
+library(fitdistrplus)
+library(patchwork)
+```
+
+```{r echo=TRUE, eval=FALSE}
+dframe <- read.csv("data/insomnia-diary.csv")
+```
+
+```{r echo=TRUE, eval=FALSE}
+days_in_months <- c(31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+month_vector <- rep(1:12, times = days_in_months)
+dframe$month_number <- month_vector
+month_name <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+month_positions <-c(0, cumsum(days_in_months) + 1)[-13]
+dframe$month <- month_name[dframe$month_number]
+```
+
+```{r echo=TRUE, eval=FALSE}
+dframe$quarter <- (dframe$month_number - 1) %/% 3 + 1
+dframe[["combo_foods"]] <- factor(with(dframe, cheese * 1 + brassica * 2 + meat * 4 + spice * 8))
+
+dframe[["trend"]] = 1:length(dframe$time_sleeping)
+dframe[["ar_1"]] = c(dframe$time_sleeping[1], head(dframe$time_sleeping, -1))
+dframe[["ar_2"]] = c(rep(dframe$time_sleeping[1], 2), head(dframe$time_sleeping, -2))
+dframe[["ar_3"]] = c(rep(dframe$time_sleeping[1], 3), head(dframe$time_sleeping, -3))
+dframe[["ar_4"]] = c(rep(dframe$time_sleeping[1], 4), head(dframe$time_sleeping, -4))
+```
+
+```{r echo=TRUE, eval=FALSE}
+convert_hms <- function(hours) {
+  total_seconds <- hours * 3600
+  hrs <- as.integer(floor(total_seconds / 3600))
+  mins <- as.integer(floor((total_seconds %% 3600) / 60))
+  secs <- as.integer(total_seconds %% 60)
+
+  sprintf("%02d hours %02d minutes %02d seconds", hrs, mins, secs)
+}
+```
+
+```{r echo=TRUE, eval=FALSE}
+estimator <- survfit(Surv(time_sleeping) ~ 1, conf.type="log-log", data = dframe)
+estimator
+```
+
+```{r echo=TRUE, eval=FALSE}
+med <- quantile(estimator, 0.5)
+med_sleep <- med$`quantile`
+lc_sleep <- med$lower
+uc_sleep <- med$upper
+```
+
+```{r echo=TRUE, eval=FALSE}
+plot(estimator, conf.int = TRUE, xlab="Time (hr)", ylab = "Survival (still sleeping) Probability")
+title("Kaplan-Meyer Estimator of Insomnia Diary Data")
+abline(h = 0.5, col = "red", lty = 3)
+lines(rep(x = uc_sleep, 2), y = c(0, 0.5), col = "blue", lty = 2)
+lines(rep(x = lc_sleep, 2), y = c(0, 0.5), col = "blue", lty = 2)
+lines(rep(x = med_sleep, 2), y = c(0, 0.5), col = "green", lty = 2)
+```
+
+```{r echo=TRUE, eval=FALSE}
+survdiff(Surv(time_sleeping) ~ cheese, data = dframe)
+```
+
+```{r echo=TRUE, eval=FALSE}
+plot(survfit(Surv(time_sleeping) ~ cheese, data = dframe), xlab="Time (hr)", ylab = "Survival (still sleeping) Probability", col=c("black", "red"), lwd = 1)
+legend("topright", legend=c("no cheese", "cheese"), col=c("black", "red"), lwd = 1)
+```
+
+```{r echo=TRUE, eval=FALSE}
+survdiff(Surv(time_sleeping) ~ brassica, data = dframe)
+```
+
+```{r echo=TRUE, eval=FALSE}
+plot(survfit(Surv(time_sleeping) ~ brassica, data = dframe), xlab="Time (hr)", ylab = "Survival (still sleeping) Probability", col=c("black", "red"), lwd = 1)
+legend("topright", legend=c("no brassica", "brassica"), col=c("black", "red"), lwd = 1)
+```
+
+```{r echo=TRUE, eval=FALSE}
+survdiff(Surv(time_sleeping) ~ meat, data = dframe)
+```
+
+```{r echo=TRUE, eval=FALSE}
+plot(survfit(Surv(time_sleeping) ~ meat, data = dframe), xlab="Time (hr)", ylab = "Survival (still sleeping) Probability", col=c("black", "red"), lwd = 1)
+legend("topright", legend=c("no meat", "meat"), col=c("black", "red"), lwd = 1)
+```
+
+```{r echo=TRUE, eval=FALSE}
+survdiff(Surv(time_sleeping) ~ spice, data = dframe)
+```
+
+```{r echo=TRUE, eval=FALSE}
+plot(survfit(Surv(time_sleeping) ~ spice, data = dframe), xlab="Time (hr)", ylab = "Survival (still sleeping) Probability", col=c("black", "red"), lwd = 1)
+legend("topright", legend=c("no spice", "spice"), col=c("black", "red"), lwd = 1)
+```
+
+```{r echo=TRUE, eval=FALSE}
+cph_cheese <- coxph(Surv(time_sleeping) ~ factor(cheese), data = dframe)
+summary(cph_cheese)
+```
+
+```{r echo=TRUE, eval=FALSE}
+termplot(cph_cheese, se = TRUE, terms = 1, ylabs = "Log hazard")
+```
+
+```{r echo=TRUE, eval=FALSE}
+cph_ar <- coxph(Surv(time_sleeping) ~ pspline(ar_1, df=2) + pspline(ar_2, df=2), data=dframe)
+cph_ar
+```
+
+```{r echo=TRUE, eval=FALSE}
+termplot(cph_ar, se = TRUE, terms = 1, ylabs = "Log hazard", xlabs = "Previous Night")
+abline(h = 0, col="grey", lty=3)
+
+termplot(cph_ar, se = TRUE, terms = 2, ylabs = "Log hazard", xlabs = "Two Nights Previous")
+abline(h = 0, col="grey", lty=3)
+```
+
+```{r echo=TRUE, eval=FALSE}
+cph_ar <- coxph(Surv(time_sleeping) ~ pspline(ar_1, df=2) + pspline(ar_2, df=2) + month, data=dframe)
+cph_ar
+```
+
+```{r echo=TRUE, eval=FALSE}
+summary_output <- summary(cph_ar)
+linear_coeffs <- summary_output$coefficients
+```
+
+```{r echo=TRUE, eval=FALSE}
+termplot(cph_ar, se = TRUE, terms = 1, ylabs = "Log hazard", xlabs = "Previous Night")
+abline(h = 0, col="grey", lty=3)
+
+termplot(cph_ar, se = TRUE, terms = 2, ylabs = "Log hazard", xlabs = "Two Nights Previous")
+abline(h = 0, col="grey", lty=3)
+```

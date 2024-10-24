@@ -1,7 +1,10 @@
 ---
-title: "Parametric Survival Analysis of a Sleep Diary"
-output: html_document
+author: Julian Hatwell
 date: "2024-01-05"
+title: "Parametric Survival Analysis of a Sleep Diary"
+slug: parametric-survival-food-diary
+mathjax: true
+output: html_document
 ---
 
 ```{r setup, include=FALSE}
@@ -102,17 +105,15 @@ A multi-variate linear model would normally be a starting point but there are se
 
 ### Other Considerations
 
-Time sleeping is the total time that the fitness tracker detected quality sleep. However, this is a somewhat simplified view because my sleep patterns tend to be broken and interrupted. I go to bed and get up and approximately the same time most days but some nights are very interrupted by two to three hours of wakeful restlessness. For simplicity, I'm counting this all as one sleep event of a certain length of time. It was too much trouble to count or measure the sleep interruptions. The resulting data are always a positive real number. That is, there are no nights of negative sleep and any model should reflect this. A linear model, in theory, could return a negative value, so it is necessary to consider some alternatives. 
+Time sleeping is the total time that the fitness tracker detected quality sleep. However, this is a somewhat simplified view because my sleep patterns tend to be broken and interrupted. I go to bed and get up and approximately the same time most days but some nights I have to deal with two to three hours of wakeful restlessness. For simplicity, I'm counting this all as one sleep event of a certain length of time. It was too much trouble to count or measure the sleep interruptions. The resulting data are always a positive real number. That is, there are no nights of negative sleep and any model should reflect this. A linear model, in theory, could return a negative value, so it is necessary to consider some alternatives. 
 
 Time-to-event is often modeled using Gamma or Weibull distributions, and well understood within Survival Analytics. So, to test this line of thinking, I would like to compare three models: Linear, Generalized Linear with Gamma family, and a parametric survival model with Weibull distribution. 
 
 ## Pre-requisites
 
-I use the versatile Anderson-Darling test for goodness of fit with the three candidate distributions. Although other tests such as Kolmogorov-Smirnov and Shapiro-Wilks are most common for goodness of fit to the Normal distribution, Anderson-Darling still works very well, and given the decent sample size and putting aside the likely presence of auto-correlation, it's very useful to be able to use the same test for all three candidates. Anderson-Darling test is most sensitive to deviations in the tail, and so is an excellent choice for making assessments of fit to both Gamma and Weibull.
+I use the versatile Anderson-Darling test for goodness of fit with the three candidate distributions. Although other tests such as Kolmogorov-Smirnov and Shapiro-Wilks are most common for goodness of fit to the Normal distribution, Anderson-Darling still works well for the Normal, and given the decent sample size and putting aside the likely presence of auto-correlation, it's very useful to be able to use the same test for all three candidates. Anderson-Darling test is most sensitive to deviations in the tail, and so is an excellent choice for making assessments of fit to both Gamma and Weibull distributions.
 
-One disadvantage is that the tests assume fixed, known parameters. However, these are unknown and have to be estimated directly from the data to provide to the test routines. This is not recommended practice and can lead to biased results.
-
-A further visual check with a Q-Q plot should be enough to confirm or reject the goodness-of-fit test results.
+One disadvantage is that the tests assume fixed, known parameters. However, these are unknown and have to be estimated directly from the data to provide to the test routines. This is not recommended practice and can lead to biased results. On this occasion, I will accept the risk because it is outweighed by the convenience of assessing all three fits with the same test. I can apply a further visual check with a Q-Q plot should be enough to confirm or reject the goodness-of-fit test results.
 
 ```{r normal_tests}
 ad_test_normal <- ad.test(dframe$time_sleeping, pnorm, mean = mean(dframe$time_sleeping), sd = sd(dframe$time_sleeping))
@@ -428,9 +429,7 @@ $$
 S(t) = e^{\big(-(\frac{t}{\lambda})^\mathrm{shape} \big)}
 $$
 
-When used to make point predictions from such a model, $t$ is set equal to $\lambda$ and the resulting function simplifies to $S(\lambda) = e^{-1} = 0.3679$. This is a little limiting and perhaps not a very intuitive view of the prediction, i.e. there is a probability of $1 - S(\lambda) = 0.6321$ that I will have woken up by the predicted time sleeping.
-
-A more used and versatile way to report a predicted survival statistic is the $0.5$ quantile, the median instead. This is much easier to understand. I will sleep this long or shorter/longer 50% of the time on any night with the same conditions. To see the utility of this, we can plot survival curves for various combinations of food triggers at different times of year, and we have an intuitive interpretation as the diminishing chance to still be asleep after a certain length of time has elapsed.
+Point predictions from such a model are equal to the expected value, of course. However, the Weibull distribution is very flexible, and this point prediction may be far from the most common outcome. On the other hand, the survival curve is useful because it is so easy to estimate the median or a quartile range, for example. This is much easier to understand. On any night with the same conditions, I will sleep this long or shorter/longer 50% of the time. To see the utility of this, we can plot survival curves for various combinations of food triggers at different times of year, and we have an intuitive interpretation as the diminishing chance to still be asleep after a certain length of time has elapsed.
 
 First, I will review the base case $\pm$ 30 minutes and 1 hour.
 
@@ -470,6 +469,7 @@ surv_plot_func <- function(surv_probs) {
   # Create the ggplot object
   p <- ggplot(surv_probs_long, aes(x = time, y = survival_prob, color = observation)) +
     geom_line() +
+    geom_hline(yintercept = 0.5, linetype = "dashed", color = "grey", alpha = 0.75) + 
     labs(x = "Time", y = "Survival Probability", title = "Survival Curves for Controlled Observations (Weibull Model)") +
     theme_minimal()  # Minimal theme for a clean look
   
